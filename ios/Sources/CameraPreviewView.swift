@@ -1,29 +1,32 @@
 import AVFoundation
 import SwiftUI
 import UIKit
+import Vision
 
 @MainActor
 public final class CameraController: NSObject, ObservableObject {
     public let session = AVCaptureSession()
     @Published public var liveComponents: [DetectedComponent] = []
+    @Published public var frameAspectRatio: Double = 9.0 / 16.0
     @Published public var isAuthorized = false
     @Published public var cameraError: String?
     @Published public var isTorchOn = false
 
     private let videoQueue = DispatchQueue(label: "com.craigmerry.circuitlens.video", qos: .userInitiated)
     private let ciContext = CIContext()
-    private let scanner = BoardScanner()
-    private var isScanningFrame = false
-    private var lastScanTime: TimeInterval = 0
-    private var latestCGImage: CGImage?
 
-    // Temporal tracker so detected AR labels stay locked & smooth across live frames
+    // Accessed only on videoQueue
+    private nonisolated(unsafe) var isScanningFrame = false
+    private nonisolated(unsafe) var lastScanTime: TimeInterval = 0
+    private nonisolated(unsafe) var latestPixelBuffer: CVPixelBuffer?
+
+    // Temporal tracker on MainActor so AR highlights stay steady on the PCB
     private struct TrackedItem {
         var component: DetectedComponent
         var lastSeen: TimeInterval
     }
     private var tracked: [String: TrackedItem] = [:]
-    private let retentionWindow: TimeInterval = 2.4
+    private let retentionWindow: TimeInterval = 1.8
 
     public override init() {
         super.init()
@@ -79,7 +82,13 @@ public final class CameraController: NSObject, ObservableObject {
     }
 
     public func captureSnapshot() -> UIImage? {
-        guard let cg = latestCGImage else { return nil }
+        var pb: CVPixelBuffer?
+        videoQueue.sync {
+            pb = self.latestPixelBuffer
+        }
+        guard let pb else { return nil }
+        let ciImage = CIImage(cvPixelBuffer: pb)
+        guard let cg = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return nil }
         return UIImage(cgImage: cg)
     }
 
@@ -130,8 +139,11 @@ public final class CameraController: NSObject, ObservableObject {
         }
     }
 
-    private func updateTracked(with found: [DetectedComponent], at now: TimeInterval) {
-        let alpha = 0.55 // smooth bounding box motion
+    private func updateTracked(with found: [DetectedComponent], aspect: Double, at now: TimeInterval) {
+        if abs(frameAspectRatio - aspect) > 0.01 {
+            frameAspectRatio = aspect
+        }
+        let alpha = 0.65 // fast, responsive tracking directly over moving board symbols
         for item in found {
             let key = item.designator
             if let prev = tracked[key] {
@@ -152,7 +164,6 @@ public final class CameraController: NSObject, ObservableObject {
             }
         }
 
-        // Expire items not seen recently
         tracked = tracked.filter { now - $0.value.lastSeen <= retentionWindow }
         liveComponents = tracked.values
             .map(\.component)
@@ -167,18 +178,37 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         from connection: AVCaptureConnection
     ) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
+        self.latestPixelBuffer = pixelBuffer
 
         let now = Date.timeIntervalSinceReferenceDate
-        Task { @MainActor in
-            self.latestCGImage = cgImage
-            guard !self.isScanningFrame, now - self.lastScanTime >= 0.55 else { return }
-            self.isScanningFrame = true
-            self.lastScanTime = now
-            let found = await self.scanner.scan(cgImage: cgImage, accurate: false)
-            self.updateTracked(with: found, at: now)
-            self.isScanningFrame = false
+        guard !self.isScanningFrame, now - self.lastScanTime >= 0.35 else { return }
+        self.isScanningFrame = true
+        self.lastScanTime = now
+
+        let w = Double(CVPixelBufferGetWidth(pixelBuffer))
+        let h = Double(CVPixelBufferGetHeight(pixelBuffer))
+        let aspect = h > 0 ? (w / h) : (9.0 / 16.0)
+
+        // Run Vision OCR directly on CVPixelBuffer off the main thread (no CGImage copy!)
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        request.minimumTextHeight = 0.009
+
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+        var found: [DetectedComponent] = []
+        do {
+            try handler.perform([request])
+            let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
+            found = BoardScanner.extractComponents(from: observations)
+        } catch {
+            found = []
+        }
+        self.isScanningFrame = false
+
+        let detected = found
+        Task { @MainActor [weak self] in
+            self?.updateTracked(with: detected, aspect: aspect, at: now)
         }
     }
 }
@@ -201,155 +231,107 @@ public struct CameraPreviewView: UIViewRepresentable {
     }
 }
 
-/// Rich AR overlay pinning glowing target boxes + leader pins + readable symbol labels over ALL detected board symbols.
+/// Direct, pixel-exact on-symbol AR overlay pinned right onto each detected board symbol.
 public struct AROverlayView: View {
     public let components: [DetectedComponent]
+    public let frameAspectRatio: Double
     public let selectedID: String?
     public let onSelect: (DetectedComponent) -> Void
 
     public init(
         components: [DetectedComponent],
+        frameAspectRatio: Double = 9.0 / 16.0,
         selectedID: String? = nil,
         onSelect: @escaping (DetectedComponent) -> Void
     ) {
         self.components = components
+        self.frameAspectRatio = frameAspectRatio
         self.selectedID = selectedID
         self.onSelect = onSelect
     }
 
     public var body: some View {
         GeometryReader { geo in
-            let placed = computeLabelPositions(in: geo.size)
-
             ZStack {
-                // 1. Target reticles & leader pins directly over each detected board symbol
-                ForEach(placed, id: \.component.id) { item in
-                    let comp = item.component
+                ForEach(components) { comp in
+                    let rect = projectAspectFill(comp: comp, in: geo.size)
                     let isSelected = selectedID == comp.id
-                    let rect = item.boxRect
 
-                    // Glowing target box over the actual silkscreen/chip bounding box
+                    // Tight glowing highlight frame directly hugging the physical symbol on the PCB
                     RoundedRectangle(cornerRadius: 6)
-                        .stroke(comp.category.color, lineWidth: isSelected ? 2.5 : 1.5)
+                        .stroke(isSelected ? Color.yellow : comp.category.color, lineWidth: isSelected ? 3.0 : 2.0)
                         .background(
                             RoundedRectangle(cornerRadius: 6)
-                                .fill(comp.category.color.opacity(isSelected ? 0.24 : 0.10))
+                                .fill(comp.category.color.opacity(isSelected ? 0.28 : 0.14))
                         )
-                        .frame(width: max(26, rect.width + 10), height: max(20, rect.height + 8))
+                        .frame(width: max(30, rect.width + 10), height: max(22, rect.height + 8))
                         .position(x: rect.midX, y: rect.midY)
 
-                    // Leader line connecting the board symbol to its AR label card
-                    Path { path in
-                        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
-                        path.addLine(to: CGPoint(x: item.labelCenter.x, y: item.labelCenter.y + 18))
-                    }
-                    .stroke(comp.category.color.opacity(0.85), style: StrokeStyle(lineWidth: 1.4, dash: [3, 2]))
-
-                    // Anchor dot on the symbol
-                    Circle()
-                        .fill(comp.category.color)
-                        .frame(width: 6, height: 6)
-                        .position(x: rect.midX, y: rect.midY)
-                }
-
-                // 2. Floating AR Symbol Callout Cards (designator + role/chip marking)
-                ForEach(placed, id: \.component.id) { item in
-                    let comp = item.component
-                    let isSelected = selectedID == comp.id
-
+                    // High-contrast direct on-symbol AR tag seated right at the symbol's top edge
                     Button {
                         onSelect(comp)
                     } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: comp.category.sfSymbol)
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(comp.category.color)
-                                .frame(width: 16, height: 16)
-
-                            VStack(alignment: .leading, spacing: 1) {
-                                HStack(spacing: 4) {
-                                    Text(comp.designator)
-                                        .font(.system(size: 11, weight: .heavy, design: .monospaced))
-                                        .foregroundStyle(.white)
-                                    if let marking = comp.partMarking, !marking.isEmpty {
-                                        Text(marking)
-                                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                            .foregroundStyle(.yellow)
-                                            .lineLimit(1)
-                                    }
-                                }
-                                Text(comp.category.rawValue + " · " + comp.category.shortRole)
-                                    .font(.system(size: 9.5, weight: .medium))
-                                    .foregroundStyle(.white.opacity(0.82))
-                                    .lineLimit(1)
-                            }
+                        HStack(spacing: 4) {
+                            Text(comp.designator)
+                                .font(.system(size: 12, weight: .black, design: .monospaced))
+                                .foregroundStyle(.yellow)
+                            Text(comp.partMarking ?? comp.category.rawValue)
+                                .font(.system(size: 10.5, weight: .bold))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
                         .background(
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(.black.opacity(isSelected ? 0.92 : 0.78))
+                            Capsule()
+                                .fill(.black.opacity(0.86))
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(comp.category.color, lineWidth: isSelected ? 2.2 : 1.3)
+                            Capsule()
+                                .stroke(isSelected ? Color.yellow : comp.category.color, lineWidth: 1.5)
                         )
-                        .shadow(color: .black.opacity(0.45), radius: 4, y: 2)
+                        .shadow(color: .black.opacity(0.6), radius: 3, y: 1)
                     }
                     .buttonStyle(.plain)
-                    .position(item.labelCenter)
+                    .position(
+                        x: min(max(56, rect.midX), geo.size.width - 56),
+                        y: max(96, rect.minY - 14)
+                    )
                 }
             }
-            .animation(.easeOut(duration: 0.18), value: components.map(\.id))
+            .animation(.easeOut(duration: 0.12), value: components.map(\.id))
         }
+        .ignoresSafeArea()
     }
 
-    private struct PlacedLabel {
-        let component: DetectedComponent
-        let boxRect: CGRect
-        let labelCenter: CGPoint
-    }
+    /// Exact `.resizeAspectFill` projection from Vision normalized coordinates (bottom-left origin) to screen points.
+    private func projectAspectFill(comp: DetectedComponent, in viewSize: CGSize) -> CGRect {
+        let viewW = max(1, viewSize.width)
+        let viewH = max(1, viewSize.height)
+        let viewAspect = viewW / viewH
+        let imgAspect = max(0.2, frameAspectRatio)
 
-    /// Compute non-overlapping AR label positions gently nudged above each board symbol.
-    private func computeLabelPositions(in size: CGSize) -> [PlacedLabel] {
-        let topSafe: CGFloat = 110
-        let bottomSafe: CGFloat = max(topSafe + 60, size.height - 235)
-        let halfW: CGFloat = 78
-        let minDy: CGFloat = 40
-        let minDx: CGFloat = 132
+        let renderedW: CGFloat
+        let renderedH: CGFloat
+        let offsetX: CGFloat
+        let offsetY: CGFloat
 
-        var placed: [PlacedLabel] = []
-        let sorted = components.sorted { $0.boxY > $1.boxY } // top-to-bottom on screen
-
-        for comp in sorted {
-            let rx = comp.boxX * size.width
-            let rw = comp.boxW * size.width
-            let rh = comp.boxH * size.height
-            let ry = (1.0 - comp.boxY - comp.boxH) * size.height
-            let rect = CGRect(x: rx, y: ry, width: rw, height: rh)
-
-            var lx = min(max(halfW, rect.midX), size.width - halfW)
-            var ly = min(max(topSafe, rect.minY - 26), bottomSafe)
-
-            // Simple collision push so dense board symbols remain readable
-            for _ in 0..<4 {
-                var nudged = false
-                for existing in placed {
-                    if abs(existing.labelCenter.x - lx) < minDx && abs(existing.labelCenter.y - ly) < minDy {
-                        ly = (ly - minDy >= topSafe) ? (ly - minDy) : min(bottomSafe, ly + minDy)
-                        lx = min(max(halfW, lx + (lx < size.width * 0.5 ? 24 : -24)), size.width - halfW)
-                        nudged = true
-                    }
-                }
-                if !nudged { break }
-            }
-
-            placed.append(PlacedLabel(
-                component: comp,
-                boxRect: rect,
-                labelCenter: CGPoint(x: lx, y: ly)
-            ))
+        if imgAspect > viewAspect {
+            renderedH = viewH
+            renderedW = viewH * imgAspect
+            offsetX = (viewW - renderedW) * 0.5
+            offsetY = 0
+        } else {
+            renderedW = viewW
+            renderedH = viewW / imgAspect
+            offsetX = 0
+            offsetY = (viewH - renderedH) * 0.5
         }
-        return placed
+
+        let x = offsetX + comp.boxX * renderedW
+        let y = offsetY + (1.0 - comp.boxY - comp.boxH) * renderedH
+        let w = comp.boxW * renderedW
+        let h = comp.boxH * renderedH
+        return CGRect(x: x, y: y, width: w, height: h)
     }
 }

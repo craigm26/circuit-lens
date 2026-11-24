@@ -1,26 +1,54 @@
 import Foundation
 import Vision
 import CoreImage
+import CoreVideo
 
 public final class BoardScanner: Sendable {
+    private static let visionQueue = DispatchQueue(
+        label: "com.craigmerry.circuitlens.vision",
+        qos: .userInitiated
+    )
+
     public init() {}
 
-    /// Run Vision OCR on a CGImage and pair silkscreen designators with nearby IC markings.
-    public func scan(cgImage: CGImage, accurate: Bool) async -> [DetectedComponent] {
+    /// Run Vision OCR directly on a live CVPixelBuffer off the main thread (zero CGImage copy overhead).
+    public func scan(pixelBuffer: CVPixelBuffer, accurate: Bool = true) async -> [DetectedComponent] {
         await withCheckedContinuation { continuation in
-            let request = VNRecognizeTextRequest { req, _ in
-                let observations = (req.results as? [VNRecognizedTextObservation]) ?? []
-                continuation.resume(returning: Self.extractComponents(from: observations))
-            }
-            request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = false
-            request.minimumTextHeight = accurate ? 0.008 : 0.011
+            Self.visionQueue.async {
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = accurate ? .accurate : .fast
+                request.usesLanguageCorrection = false
+                request.minimumTextHeight = 0.009
 
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-            do {
-                try handler.perform([request])
-            } catch {
-                continuation.resume(returning: [])
+                let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+                do {
+                    try handler.perform([request])
+                    let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
+                    continuation.resume(returning: Self.extractComponents(from: observations))
+                } catch {
+                    continuation.resume(returning: [])
+                }
+            }
+        }
+    }
+
+    /// Run Vision OCR on a still CGImage off the main thread.
+    public func scan(cgImage: CGImage, accurate: Bool = true) async -> [DetectedComponent] {
+        await withCheckedContinuation { continuation in
+            Self.visionQueue.async {
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = accurate ? .accurate : .fast
+                request.usesLanguageCorrection = false
+                request.minimumTextHeight = 0.008
+
+                let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+                do {
+                    try handler.perform([request])
+                    let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
+                    continuation.resume(returning: Self.extractComponents(from: observations))
+                } catch {
+                    continuation.resume(returning: [])
+                }
             }
         }
     }
@@ -29,6 +57,7 @@ public final class BoardScanner: Sendable {
         struct ChipHit {
             let marking: String
             let hint: String?
+            let box: CGRect
             let center: CGPoint
         }
 
@@ -39,13 +68,22 @@ public final class BoardScanner: Sendable {
             guard let top = obs.topCandidates(1).first else { continue }
             let box = obs.boundingBox
             let center = CGPoint(x: box.midX, y: box.midY)
-            let tokens = top.string.split { !$0.isLetter && !$0.isNumber }.map(String.init)
+            let rawText = top.string.trimmingCharacters(in: .whitespacesAndNewlines)
 
+            // 1. Check whole string collapsed (handles spaced silkscreen like "C 3", "RY 2", "IC 5")
+            let collapsed = rawText.replacingOccurrences(of: " ", with: "")
+            if collapsed.count <= 8, let (des, cat) = DesignatorCatalog.classifyDesignator(collapsed) {
+                rawDesignators.append((des, cat, box))
+                continue
+            }
+
+            // 2. Check individual tokens (preserving dots for 3.3V / 4.7K)
+            let tokens = rawText.split { !$0.isLetter && !$0.isNumber && $0 != "." }.map(String.init)
             for token in tokens {
                 if let (des, cat) = DesignatorCatalog.classifyDesignator(token) {
                     rawDesignators.append((des, cat, box))
                 } else if let chip = DesignatorCatalog.matchChipMarking(token) {
-                    chipHits.append(ChipHit(marking: chip.marking, hint: chip.hint, center: center))
+                    chipHits.append(ChipHit(marking: chip.marking, hint: chip.hint, box: box, center: center))
                 }
             }
         }
@@ -63,7 +101,7 @@ public final class BoardScanner: Sendable {
                 if let nearest = chipHits.min(by: {
                     hypot($0.center.x - center.x, $0.center.y - center.y) <
                     hypot($1.center.x - center.x, $1.center.y - center.y)
-                }), hypot(nearest.center.x - center.x, nearest.center.y - center.y) < 0.25 {
+                }), hypot(nearest.center.x - center.x, nearest.center.y - center.y) < 0.28 {
                     matchedMarking = nearest.marking
                     matchedHint = nearest.hint
                 }
@@ -92,10 +130,10 @@ public final class BoardScanner: Sendable {
                     category: .ic,
                     partMarking: chip.marking,
                     partHint: chip.hint,
-                    boxX: max(0, chip.center.x - 0.08),
-                    boxY: max(0, chip.center.y - 0.05),
-                    boxW: 0.16,
-                    boxH: 0.10
+                    boxX: chip.box.origin.x,
+                    boxY: chip.box.origin.y,
+                    boxW: chip.box.size.width,
+                    boxH: chip.box.size.height
                 ))
             }
         }

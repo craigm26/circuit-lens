@@ -244,15 +244,62 @@ public enum DesignatorCatalog {
     public static func classifyDesignator(_ raw: String) -> (designator: String, category: ComponentCategory)? {
         let cleaned = raw
             .uppercased()
+            .replacingOccurrences(of: " ", with: "")
             .trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        guard cleaned.count >= 2, cleaned.count <= 7 else { return nil }
+        guard cleaned.count >= 2, cleaned.count <= 8 else { return nil }
 
+        // Common silkscreen power rails, bus pins & board markings
+        if let special = classifyRailOrBus(cleaned) {
+            return special
+        }
+
+        // Standard IEEE/IPC-2612 reference designators (e.g. C3, IC5, RY2, R14A, U1B)
         for (prefix, category) in prefixMap {
             if cleaned.hasPrefix(prefix) {
                 let rest = cleaned.dropFirst(prefix.count)
-                if !rest.isEmpty, rest.allSatisfy(\.isNumber), let num = Int(rest), num >= 0, num <= 9999 {
+                guard !rest.isEmpty else { continue }
+                // Allow digits optionally followed by a single unit suffix letter (e.g. U1A, C3B)
+                let digits = rest.prefix(while: \.isNumber)
+                let suffix = rest.dropFirst(digits.count)
+                if !digits.isEmpty,
+                   suffix.count <= 1,
+                   (suffix.isEmpty || suffix.allSatisfy(\.isLetter)),
+                   let num = Int(digits), num >= 0, num <= 9999 {
                     return (cleaned, category)
                 }
+            }
+        }
+        return nil
+    }
+
+    /// Recognize common PCB silkscreen power rails, buses, and component value markings.
+    private static func classifyRailOrBus(_ token: String) -> (designator: String, category: ComponentCategory)? {
+        let powerRails: Set<String> = [
+            "GND", "AGND", "DGND", "PGND", "VCC", "VDD", "VSS", "VEE", "VIN", "VOUT",
+            "VBUS", "VBAT", "3V3", "5V", "12V", "24V", "1V8", "3.3V", "PWR", "AC", "DC"
+        ]
+        if powerRails.contains(token) {
+            return (token, .connector)
+        }
+        let busPins: Set<String> = [
+            "TX", "RX", "TXD", "RXD", "SDA", "SCL", "MOSI", "MISO", "SCK", "SCLK",
+            "CLK", "RST", "RESET", "BOOT", "PWM", "ADC", "DAC", "GPIO", "SWD", "SWDIO",
+            "SWCLK", "CANH", "CANL", "USB", "HDMI", "ETH", "WIFI", "ANT", "LED", "BTN"
+        ]
+        if busPins.contains(token) {
+            return (token, .connector)
+        }
+        // Component value silkscreen (e.g. 10UF, 100NF, 470UF, 10K, 16MHZ)
+        if token.hasSuffix("UF") || token.hasSuffix("NF") || token.hasSuffix("PF") {
+            let num = token.dropLast(2)
+            if !num.isEmpty, num.allSatisfy({ $0.isNumber || $0 == "." }) {
+                return (token, .capacitor)
+            }
+        }
+        if token.hasSuffix("MHZ") || token.hasSuffix("KHZ") {
+            let num = token.dropLast(3)
+            if !num.isEmpty, num.allSatisfy({ $0.isNumber || $0 == "." }) {
+                return (token, .crystal)
             }
         }
         return nil

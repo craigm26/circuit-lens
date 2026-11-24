@@ -35,7 +35,11 @@ public struct ContentView: View {
                         .resizable()
                         .scaledToFill()
                         .ignoresSafeArea()
-                    AROverlayView(components: frozenComponents, selectedID: selectedComponent?.id) { comp in
+                    AROverlayView(
+                        components: frozenComponents,
+                        frameAspectRatio: Double(frozen.size.width / max(1, frozen.size.height)),
+                        selectedID: selectedComponent?.id
+                    ) { comp in
                         withAnimation(.spring(response: 0.25)) {
                             selectedComponent = (selectedComponent?.id == comp.id) ? nil : comp
                         }
@@ -43,7 +47,11 @@ public struct ContentView: View {
                 } else if camera.isAuthorized && camera.cameraError == nil {
                     CameraPreviewView(session: camera.session)
                         .ignoresSafeArea()
-                    AROverlayView(components: camera.liveComponents, selectedID: selectedComponent?.id) { comp in
+                    AROverlayView(
+                        components: camera.liveComponents,
+                        frameAspectRatio: camera.frameAspectRatio,
+                        selectedID: selectedComponent?.id
+                    ) { comp in
                         withAnimation(.spring(response: 0.25)) {
                             selectedComponent = (selectedComponent?.id == comp.id) ? nil : comp
                         }
