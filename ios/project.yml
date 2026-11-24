@@ -1,0 +1,44 @@
+name: CircuitLens
+options:
+  bundleIdPrefix: com.craigmerry
+  deploymentTarget:
+    iOS: "26.0"
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: WYGG3JXWMG
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "6.0"
+  configs:
+    debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG $(inherited)"
+
+targets:
+  CircuitLens:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - Assets.xcassets
+      - path: PrivacyInfo.xcprivacy
+        buildPhase: resources
+    settings:
+      base:
+        SDKROOT: iphoneos
+        PRODUCT_BUNDLE_IDENTIFIER: com.craigmerry.circuitlens
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: CircuitLens
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        ITSAppUsesNonExemptEncryption: false
+        NSCameraUsageDescription: "CircuitLens uses the camera to read silkscreen reference codes and chip markings on circuit boards in AR."
+        NSLocalNetworkUsageDescription: "CircuitLens saves your family electronics teardowns to your local pi-nas.local studio server."
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
