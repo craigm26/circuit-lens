@@ -13,20 +13,23 @@ public final class CameraController: NSObject, ObservableObject {
     @Published public var isTorchOn = false
 
     private let videoQueue = DispatchQueue(label: "com.craigmerry.circuitlens.video", qos: .userInitiated)
+    private let ocrQueue = DispatchQueue(label: "com.craigmerry.circuitlens.ocr", qos: .userInitiated)
     private let ciContext = CIContext()
 
     // Accessed only on videoQueue
-    private nonisolated(unsafe) var isScanningFrame = false
-    private nonisolated(unsafe) var lastScanTime: TimeInterval = 0
+    private nonisolated(unsafe) var isRunningOCR = false
+    private nonisolated(unsafe) var lastOCRTime: TimeInterval = 0
+    private nonisolated(unsafe) var lastFlowTime: TimeInterval = 0
+    private nonisolated(unsafe) var previousPixelBuffer: CVPixelBuffer?
     private nonisolated(unsafe) var latestPixelBuffer: CVPixelBuffer?
 
-    // Temporal tracker on MainActor so AR highlights stay steady on the PCB
+    // Board-locked temporal tracker on MainActor (deadband anti-jitter + optical flow shift)
     private struct TrackedItem {
         var component: DetectedComponent
         var lastSeen: TimeInterval
     }
     private var tracked: [String: TrackedItem] = [:]
-    private let retentionWindow: TimeInterval = 1.8
+    private let retentionWindow: TimeInterval = 4.0
 
     public override init() {
         super.init()
@@ -56,6 +59,11 @@ public final class CameraController: NSObject, ObservableObject {
         videoQueue.async { [session] in
             if session.isRunning { session.stopRunning() }
         }
+    }
+
+    public func resetTracking() {
+        tracked.removeAll()
+        liveComponents = []
     }
 
     public func toggleTorch() {
@@ -102,7 +110,6 @@ public final class CameraController: NSObject, ObservableObject {
             self.session.beginConfiguration()
             self.session.sessionPreset = .hd1920x1080
 
-            // Prefer multi-cam systems that auto-switch to macro close-ups seamlessly
             let device = AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: .back)
                 ?? AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back)
                 ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
@@ -139,26 +146,85 @@ public final class CameraController: NSObject, ObservableObject {
         }
     }
 
-    private func updateTracked(with found: [DetectedComponent], aspect: Double, at now: TimeInterval) {
+    /// Shift all locked labels smoothly by the board's frame-to-frame optical translation (zero bounce!).
+    private func applyOpticalShift(dx: Double, dy: Double) {
+        guard !tracked.isEmpty else { return }
+        guard abs(dx) > 0.0005 || abs(dy) > 0.0005 else { return }
+
+        var updated: [String: TrackedItem] = [:]
+        for (key, item) in tracked {
+            let c = item.component
+            let nx = c.boxX - dx
+            let ny = c.boxY - dy
+            // Keep only labels still within visible bounds
+            if nx > -0.15 && nx < 1.15 && ny > -0.15 && ny < 1.15 {
+                let shifted = DetectedComponent(
+                    designator: c.designator,
+                    category: c.category,
+                    partMarking: c.partMarking,
+                    partHint: c.partHint,
+                    boxX: nx,
+                    boxY: ny,
+                    boxW: c.boxW,
+                    boxH: c.boxH
+                )
+                updated[key] = TrackedItem(component: shifted, lastSeen: item.lastSeen)
+            }
+        }
+        tracked = updated
+        liveComponents = tracked.values
+            .map(\.component)
+            .sorted { $0.designator < $1.designator }
+    }
+
+    /// Reconcile fresh OCR detections using deadband anti-jitter so locked labels stay static on the board.
+    private func reconcileOCR(with found: [DetectedComponent], aspect: Double, at now: TimeInterval) {
         if abs(frameAspectRatio - aspect) > 0.01 {
             frameAspectRatio = aspect
         }
-        let alpha = 0.65 // fast, responsive tracking directly over moving board symbols
+
+        let deadband = 0.018 // < 1.8% drift = zero movement (eliminates OCR sub-pixel bounce!)
+        let blendAlpha = 0.25 // gentle drift correction when hand moves steadily
+
         for item in found {
             let key = item.designator
             if let prev = tracked[key] {
                 let p = prev.component
-                let smoothed = DetectedComponent(
+                let dist = hypot(item.boxX - p.boxX, item.boxY - p.boxY)
+                let finalX: Double
+                let finalY: Double
+                let finalW: Double
+                let finalH: Double
+
+                if dist < deadband {
+                    // Stay rock-solid static on the board!
+                    finalX = p.boxX
+                    finalY = p.boxY
+                    finalW = p.boxW
+                    finalH = p.boxH
+                } else if dist < 0.14 {
+                    finalX = p.boxX * (1 - blendAlpha) + item.boxX * blendAlpha
+                    finalY = p.boxY * (1 - blendAlpha) + item.boxY * blendAlpha
+                    finalW = p.boxW * (1 - blendAlpha) + item.boxW * blendAlpha
+                    finalH = p.boxH * (1 - blendAlpha) + item.boxH * blendAlpha
+                } else {
+                    finalX = item.boxX
+                    finalY = item.boxY
+                    finalW = item.boxW
+                    finalH = item.boxH
+                }
+
+                let merged = DetectedComponent(
                     designator: item.designator,
                     category: item.category,
                     partMarking: item.partMarking ?? p.partMarking,
                     partHint: item.partHint ?? p.partHint,
-                    boxX: p.boxX * (1 - alpha) + item.boxX * alpha,
-                    boxY: p.boxY * (1 - alpha) + item.boxY * alpha,
-                    boxW: p.boxW * (1 - alpha) + item.boxW * alpha,
-                    boxH: p.boxH * (1 - alpha) + item.boxH * alpha
+                    boxX: finalX,
+                    boxY: finalY,
+                    boxW: finalW,
+                    boxH: finalH
                 )
-                tracked[key] = TrackedItem(component: smoothed, lastSeen: now)
+                tracked[key] = TrackedItem(component: merged, lastSeen: now)
             } else {
                 tracked[key] = TrackedItem(component: item, lastSeen: now)
             }
@@ -178,37 +244,61 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         from connection: AVCaptureConnection
     ) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        self.latestPixelBuffer = pixelBuffer
-
         let now = Date.timeIntervalSinceReferenceDate
-        guard !self.isScanningFrame, now - self.lastScanTime >= 0.35 else { return }
-        self.isScanningFrame = true
-        self.lastScanTime = now
-
         let w = Double(CVPixelBufferGetWidth(pixelBuffer))
         let h = Double(CVPixelBufferGetHeight(pixelBuffer))
         let aspect = h > 0 ? (w / h) : (9.0 / 16.0)
 
-        // Run Vision OCR directly on CVPixelBuffer off the main thread (no CGImage copy!)
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = false
-        request.minimumTextHeight = 0.009
-
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
-        var found: [DetectedComponent] = []
-        do {
-            try handler.perform([request])
-            let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
-            found = BoardScanner.extractComponents(from: observations)
-        } catch {
-            found = []
+        // 1. Lightweight ~20fps optical-flow board registration so locked labels stay static on the PCB
+        if let prev = self.previousPixelBuffer, now - self.lastFlowTime >= 0.045 {
+            self.lastFlowTime = now
+            let regReq = VNTranslationalImageRegistrationRequest(targetedCVPixelBuffer: pixelBuffer)
+            let regHandler = VNImageRequestHandler(cvPixelBuffer: prev, options: [:])
+            if let _ = try? regHandler.perform([regReq]),
+               let obs = regReq.results?.first as? VNImageTranslationAlignmentObservation {
+                let tx = Double(obs.alignmentTransform.tx)
+                let ty = Double(obs.alignmentTransform.ty)
+                let dx = w > 0 ? (tx / w) : 0
+                let dy = h > 0 ? (ty / h) : 0
+                if abs(dx) < 0.08 && abs(dy) < 0.08 {
+                    Task { @MainActor [weak self] in
+                        self?.applyOpticalShift(dx: dx, dy: dy)
+                    }
+                }
+            }
         }
-        self.isScanningFrame = false
+        self.previousPixelBuffer = pixelBuffer
+        self.latestPixelBuffer = pixelBuffer
 
-        let detected = found
-        Task { @MainActor [weak self] in
-            self?.updateTracked(with: detected, aspect: aspect, at: now)
+        // 2. High-accuracy Vision OCR every 0.60s on a separate queue (never blocks optical flow or UI)
+        guard !self.isRunningOCR, now - self.lastOCRTime >= 0.60 else { return }
+        self.isRunningOCR = true
+        self.lastOCRTime = now
+
+        let retainedBuffer = pixelBuffer
+        self.ocrQueue.async { [weak self] in
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = false
+            request.minimumTextHeight = 0.009
+
+            let handler = VNImageRequestHandler(cvPixelBuffer: retainedBuffer, options: [:])
+            var found: [DetectedComponent] = []
+            do {
+                try handler.perform([request])
+                let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
+                found = BoardScanner.extractComponents(from: observations)
+            } catch {
+                found = []
+            }
+
+            let detected = found
+            self?.videoQueue.async {
+                self?.isRunningOCR = false
+            }
+            Task { @MainActor [weak self] in
+                self?.reconcileOCR(with: detected, aspect: aspect, at: now)
+            }
         }
     }
 }
@@ -231,75 +321,127 @@ public struct CameraPreviewView: UIViewRepresentable {
     }
 }
 
-/// Direct, pixel-exact on-symbol AR overlay pinned right onto each detected board symbol.
+/// Board-locked AR overlay with Power / Data / Safety circuit layers and animated signal-flow traces.
 public struct AROverlayView: View {
     public let components: [DetectedComponent]
     public let frameAspectRatio: Double
+    public let activeLayer: CircuitLayer
     public let selectedID: String?
     public let onSelect: (DetectedComponent) -> Void
 
     public init(
         components: [DetectedComponent],
         frameAspectRatio: Double = 9.0 / 16.0,
+        activeLayer: CircuitLayer = .all,
         selectedID: String? = nil,
         onSelect: @escaping (DetectedComponent) -> Void
     ) {
         self.components = components
         self.frameAspectRatio = frameAspectRatio
+        self.activeLayer = activeLayer
         self.selectedID = selectedID
         self.onSelect = onSelect
     }
 
     public var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                ForEach(components) { comp in
-                    let rect = projectAspectFill(comp: comp, in: geo.size)
-                    let isSelected = selectedID == comp.id
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { timeline in
+            let phase = CGFloat(timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 2.0) * 28.0)
 
-                    // Tight glowing highlight frame directly hugging the physical symbol on the PCB
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(isSelected ? Color.yellow : comp.category.color, lineWidth: isSelected ? 3.0 : 2.0)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(comp.category.color.opacity(isSelected ? 0.28 : 0.14))
-                        )
-                        .frame(width: max(30, rect.width + 10), height: max(22, rect.height + 8))
-                        .position(x: rect.midX, y: rect.midY)
+            GeometryReader { geo in
+                let projected: [(comp: DetectedComponent, rect: CGRect, inLayer: Bool)] = components.map { c in
+                    (c, projectAspectFill(comp: c, in: geo.size), c.belongs(to: activeLayer))
+                }
 
-                    // High-contrast direct on-symbol AR tag seated right at the symbol's top edge
-                    Button {
-                        onSelect(comp)
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(comp.designator)
-                                .font(.system(size: 12, weight: .black, design: .monospaced))
-                                .foregroundStyle(.yellow)
-                            Text(comp.partMarking ?? comp.category.rawValue)
-                                .font(.system(size: 10.5, weight: .bold))
-                                .foregroundStyle(.white)
-                                .lineLimit(1)
+                ZStack {
+                    // 1. Animated Circuit Layer Flow Trace (Power or Data/Control path)
+                    if activeLayer == .power || activeLayer == .data {
+                        let chain = projected
+                            .filter(\.inLayer)
+                            .sorted { $0.comp.flowOrder(for: activeLayer) < $1.comp.flowOrder(for: activeLayer) }
+
+                        if chain.count >= 2 {
+                            // Soft glowing under-trace
+                            Path { path in
+                                path.move(to: CGPoint(x: chain[0].rect.midX, y: chain[0].rect.midY))
+                                for node in chain.dropFirst() {
+                                    path.addLine(to: CGPoint(x: node.rect.midX, y: node.rect.midY))
+                                }
+                            }
+                            .stroke(activeLayer.tint.opacity(0.32), style: StrokeStyle(lineWidth: 9, lineCap: .round, lineJoin: .round))
+
+                            // Animated marching energy/data pulse
+                            Path { path in
+                                path.move(to: CGPoint(x: chain[0].rect.midX, y: chain[0].rect.midY))
+                                for node in chain.dropFirst() {
+                                    path.addLine(to: CGPoint(x: node.rect.midX, y: node.rect.midY))
+                                }
+                            }
+                            .stroke(
+                                activeLayer.tint,
+                                style: StrokeStyle(lineWidth: 3.2, lineCap: .round, lineJoin: .round, dash: [12, 10], dashPhase: -phase)
+                            )
                         }
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(
-                            Capsule()
-                                .fill(.black.opacity(0.86))
-                        )
-                        .overlay(
-                            Capsule()
-                                .stroke(isSelected ? Color.yellow : comp.category.color, lineWidth: 1.5)
-                        )
-                        .shadow(color: .black.opacity(0.6), radius: 3, y: 1)
                     }
-                    .buttonStyle(.plain)
-                    .position(
-                        x: min(max(56, rect.midX), geo.size.width - 56),
-                        y: max(96, rect.minY - 14)
-                    )
+
+                    // 2. High-Voltage Safety Zone Halos when Safety layer is active
+                    if activeLayer == .safety {
+                        ForEach(projected.filter(\.inLayer), id: \.comp.id) { item in
+                            Circle()
+                                .fill(Color.red.opacity(0.20))
+                                .overlay(Circle().stroke(Color.red.opacity(0.8), style: StrokeStyle(lineWidth: 2, dash: [6, 4], dashPhase: phase)))
+                                .frame(width: max(84, item.rect.width * 2.2), height: max(84, item.rect.width * 2.2))
+                                .position(x: item.rect.midX, y: item.rect.midY)
+                        }
+                    }
+
+                    // 3. Static Board-Locked Highlight Frames & Compact On-Symbol Badges
+                    ForEach(projected, id: \.comp.id) { item in
+                        let comp = item.comp
+                        let rect = item.rect
+                        let isSelected = selectedID == comp.id
+                        let isActive = item.inLayer
+                        let accent = activeLayer == .all ? comp.category.color : (isActive ? activeLayer.tint : comp.category.color)
+
+                        // Tight highlight frame hugging the physical symbol on the board
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(isSelected ? Color.yellow : accent, lineWidth: isSelected ? 3.0 : (isActive ? 2.0 : 1.0))
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(accent.opacity(isSelected ? 0.28 : (isActive ? 0.14 : 0.04)))
+                            )
+                            .frame(width: max(28, rect.width + 8), height: max(22, rect.height + 6))
+                            .position(x: rect.midX, y: rect.midY)
+                            .opacity(isActive || isSelected ? 1.0 : 0.22)
+
+                        // Compact board-locked badge seated directly on the symbol's top edge
+                        if isActive || isSelected {
+                            Button {
+                                onSelect(comp)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Text(comp.designator)
+                                        .font(.system(size: 12, weight: .black, design: .monospaced))
+                                        .foregroundStyle(.yellow)
+                                    Text(comp.partMarking ?? comp.category.rawValue)
+                                        .font(.system(size: 10.5, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .lineLimit(1)
+                                }
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(.black.opacity(0.86)))
+                                .overlay(Capsule().stroke(isSelected ? Color.yellow : accent, lineWidth: 1.5))
+                                .shadow(color: .black.opacity(0.65), radius: 3, y: 1)
+                            }
+                            .buttonStyle(.plain)
+                            .position(
+                                x: min(max(54, rect.midX), geo.size.width - 54),
+                                y: max(108, rect.minY - 13)
+                            )
+                        }
+                    }
                 }
             }
-            .animation(.easeOut(duration: 0.12), value: components.map(\.id))
         }
         .ignoresSafeArea()
     }

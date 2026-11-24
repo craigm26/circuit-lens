@@ -1,6 +1,33 @@
 import Foundation
 import SwiftUI
 
+public enum CircuitLayer: String, CaseIterable, Identifiable, Sendable {
+    case all = "All"
+    case power = "Power"
+    case data = "Data"
+    case safety = "Safety"
+
+    public var id: String { rawValue }
+
+    public var sfSymbol: String {
+        switch self {
+        case .all: return "square.3.layers.3d"
+        case .power: return "bolt.fill"
+        case .data: return "waveform.path.ecg"
+        case .safety: return "exclamationmark.shield.fill"
+        }
+    }
+
+    public var tint: Color {
+        switch self {
+        case .all: return .cyan
+        case .power: return .orange
+        case .data: return .purple
+        case .safety: return .red
+        }
+    }
+}
+
 public enum LearningLevel: String, CaseIterable, Identifiable, Codable, Sendable {
     case kid = "Kid (10)"
     case teen = "Teen"
@@ -155,6 +182,76 @@ public struct DetectedComponent: Identifiable, Codable, Equatable, Sendable {
             return "\(designator) · \(marking)"
         }
         return "\(designator) · \(category.rawValue)"
+    }
+
+    /// Which functional circuitry layer this component primarily participates in.
+    public func belongs(to layer: CircuitLayer) -> Bool {
+        switch layer {
+        case .all:
+            return true
+        case .power:
+            if [.fuse, .transformer, .battery, .capacitor, .inductor, .diode, .protection].contains(category) {
+                return true
+            }
+            let d = designator.uppercased()
+            if ["GND", "VCC", "VDD", "VSS", "VIN", "VOUT", "VBUS", "VBAT", "3V3", "3.3V", "5V", "12V", "24V", "PWR", "AC", "DC"].contains(d) {
+                return true
+            }
+            let h = (partHint ?? "").lowercased()
+            return h.contains("power") || h.contains("regulator") || h.contains("buck") || h.contains("charger")
+        case .data:
+            if [.ic, .crystal, .transistor, .relay, .switchPart, .sensor, .led, .speaker, .resistor, .testPoint].contains(category) {
+                return true
+            }
+            let d = designator.uppercased()
+            return ["TX", "RX", "TXD", "RXD", "SDA", "SCL", "MOSI", "MISO", "SCK", "CLK", "RST", "RESET", "BOOT", "PWM", "ADC", "GPIO", "USB", "CANH", "CANL"].contains(d)
+        case .safety:
+            if [.fuse, .relay, .transformer, .protection].contains(category) {
+                return true
+            }
+            if let m = partMarking, let hit = DesignatorCatalog.matchChipMarking(m), hit.mainsRelated {
+                return true
+            }
+            let d = designator.uppercased()
+            return d == "AC" || d == "HV"
+        }
+    }
+
+    /// Ordering rank along the Power or Data signal chain for animated AR trace drawing.
+    public func flowOrder(for layer: CircuitLayer) -> Int {
+        switch layer {
+        case .power:
+            switch category {
+            case .fuse, .protection: return 1
+            case .transformer: return 2
+            case .diode: return 3
+            case .capacitor: return 4
+            case .ic: return 5
+            case .inductor: return 6
+            case .connector, .battery: return 7
+            default: return 8
+            }
+        case .data:
+            switch category {
+            case .sensor, .switchPart: return 1
+            case .crystal: return 2
+            case .ic: return 3
+            case .resistor: return 4
+            case .transistor, .relay: return 5
+            case .led, .speaker, .connector: return 6
+            default: return 7
+            }
+        case .safety:
+            switch category {
+            case .fuse, .protection: return 1
+            case .transformer: return 2
+            case .ic: return 3
+            case .relay: return 4
+            default: return 5
+            }
+        case .all:
+            return 0
+        }
     }
 }
 
