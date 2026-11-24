@@ -42,9 +42,35 @@ struct GeneratedBoardSummary {
 public final class BoardExplainer: ObservableObject {
     @Published public var summary: BoardSummaryResult?
     @Published public var isThinking = false
+    @Published public var isLiveAnalyzing = false
     @Published public var chatTurns: [ChatTurn] = []
 
+    private var lastLiveSignature: String = ""
+    private var lastLiveRunAt: TimeInterval = 0
+
     public init() {}
+
+    /// Automatically runs debounced real-time AI analysis while the user pans the live camera over a board.
+    public func liveAnalyzeIfNeeded(
+        components: [DetectedComponent],
+        lidar: LiDARMeasurement?,
+        level: LearningLevel
+    ) async {
+        guard !components.isEmpty else { return }
+        let sig = components.map { "\($0.designator):\($0.partMarking ?? "")" }.joined(separator: ",")
+            + "|L:\(lidar?.estimatedWidthMM ?? 0)|\(level.rawValue)"
+        let now = Date.timeIntervalSinceReferenceDate
+        // Avoid redundant calls if identical symbols or ran < 2.2s ago
+        guard sig != lastLiveSignature else { return }
+        guard !isLiveAnalyzing, now - lastLiveRunAt >= 2.2 else { return }
+
+        lastLiveSignature = sig
+        lastLiveRunAt = now
+        isLiveAnalyzing = true
+        defer { isLiveAnalyzing = false }
+
+        await analyze(components: components, lidar: lidar, photoCount: 1, level: level)
+    }
 
     public var isAppleIntelligenceAvailable: Bool {
         #if canImport(FoundationModels)

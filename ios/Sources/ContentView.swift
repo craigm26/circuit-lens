@@ -12,6 +12,7 @@ public struct ContentView: View {
     @State private var frozenImage: UIImage?
     @State private var frozenComponents: [DetectedComponent] = []
     @State private var selectedComponent: DetectedComponent?
+    @State private var isLiveCardExpanded = true
     @State private var showInspector = false
     @State private var showLibrary = false
     @State private var isAddingAngle = false
@@ -34,16 +35,18 @@ public struct ContentView: View {
                         .resizable()
                         .scaledToFill()
                         .ignoresSafeArea()
-                    AROverlayView(components: frozenComponents) { comp in
-                        selectedComponent = comp
-                        showInspector = true
+                    AROverlayView(components: frozenComponents, selectedID: selectedComponent?.id) { comp in
+                        withAnimation(.spring(response: 0.25)) {
+                            selectedComponent = (selectedComponent?.id == comp.id) ? nil : comp
+                        }
                     }
                 } else if camera.isAuthorized && camera.cameraError == nil {
                     CameraPreviewView(session: camera.session)
                         .ignoresSafeArea()
-                    AROverlayView(components: camera.liveComponents) { comp in
-                        selectedComponent = comp
-                        openQuickInspect(components: camera.liveComponents)
+                    AROverlayView(components: camera.liveComponents, selectedID: selectedComponent?.id) { comp in
+                        withAnimation(.spring(response: 0.25)) {
+                            selectedComponent = (selectedComponent?.id == comp.id) ? nil : comp
+                        }
                     }
                 } else {
                     VStack(spacing: 14) {
@@ -53,7 +56,7 @@ public struct ContentView: View {
                         Text("CircuitLens AR")
                             .font(.title2.bold())
                             .foregroundStyle(.white)
-                        Text(camera.cameraError ?? "Point your iPhone at any circuit board to read silkscreen codes, measure with LiDAR, and map unknown electronics.")
+                        Text(camera.cameraError ?? "Point your iPhone at any circuit board to see live AR symbol labels and real-time AI analysis.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -66,19 +69,38 @@ public struct ContentView: View {
                     }
                 }
 
-                // Top & Bottom HUD
-                VStack {
+                // Top & Bottom Floating HUD
+                VStack(spacing: 8) {
+                    // Top HUD bar
                     VStack(spacing: 6) {
-                        HStack {
+                        HStack(spacing: 8) {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(isAddingAngle ? "MAPPING ANGLE #\((activeProfile?.photos.count ?? 0) + 1)" : "CIRCUITLENS · AR PCB PROFILER")
-                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                    .foregroundStyle(isAddingAngle ? .orange : .cyan)
+                                HStack(spacing: 6) {
+                                    Circle()
+                                        .fill(activeComponents.isEmpty ? .gray : .green)
+                                        .frame(width: 7, height: 7)
+                                    Text(isAddingAngle ? "MAPPING ANGLE #\((activeProfile?.photos.count ?? 0) + 1)" : "CIRCUITLENS AR")
+                                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                        .foregroundStyle(isAddingAngle ? .orange : .cyan)
+                                }
                                 Text(hudSubtitle)
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.92))
                             }
                             Spacer()
+
+                            // Torch button for dim circuit boards
+                            Button {
+                                camera.toggleTorch()
+                            } label: {
+                                Image(systemName: camera.isTorchOn ? "flashlight.on.fill" : "flashlight.off.fill")
+                                    .font(.subheadline)
+                                    .foregroundStyle(camera.isTorchOn ? .yellow : .white)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(camera.isTorchOn ? .yellow : .white)
+
+                            // Saved Boards Library
                             Button {
                                 showLibrary = true
                             } label: {
@@ -88,6 +110,7 @@ public struct ContentView: View {
                             .buttonStyle(.bordered)
                             .tint(.white)
 
+                            // Learning Level
                             Picker("Level", selection: $level) {
                                 ForEach(LearningLevel.allCases) { lvl in
                                     Text(lvl.rawValue).tag(lvl)
@@ -123,15 +146,66 @@ public struct ContentView: View {
                             }
                         }
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                    .padding(.horizontal, 14)
-                    .padding(.top, 8)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 6)
 
                     Spacer()
 
-                    // Bottom controls
+                    // Inline Quick-Inspect Card when user taps any AR symbol on the live board
+                    if let comp = selectedComponent {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Image(systemName: comp.category.sfSymbol)
+                                    .foregroundStyle(comp.category.color)
+                                Text(comp.displayTitle)
+                                    .font(.subheadline.bold().monospaced())
+                                    .foregroundStyle(.white)
+                                Spacer()
+                                Text(comp.category.functionalZone)
+                                    .font(.caption2.bold())
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 2)
+                                    .background(comp.category.color.opacity(0.25), in: Capsule())
+                                    .foregroundStyle(comp.category.color)
+                                Button {
+                                    withAnimation { selectedComponent = nil }
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(.white.opacity(0.7))
+                                }
+                            }
+                            Text(comp.partHint ?? comp.category.kidAnalogy)
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.92))
+                            HStack {
+                                Button {
+                                    questionText = "What does \(comp.displayTitle) do on this board?"
+                                    openQuickInspect(components: activeComponents)
+                                } label: {
+                                    Label("Ask AI about \(comp.designator)", systemImage: "sparkles")
+                                        .font(.caption.bold())
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.orange)
+                                .controlSize(.small)
+                                Spacer()
+                            }
+                        }
+                        .padding(11)
+                        .background(.black.opacity(0.84), in: RoundedRectangle(cornerRadius: 14))
+                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(comp.category.color.opacity(0.7), lineWidth: 1.2))
+                        .padding(.horizontal, 12)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+
+                    // Real-Time "Live AI Analysis" Card directly over the live camera view
+                    liveAIAnalysisCard
+                        .padding(.horizontal, 12)
+
+                    // Bottom Action Dock
                     HStack(spacing: 10) {
                         Button {
                             runLiDARMeasure()
@@ -178,7 +252,7 @@ public struct ContentView: View {
                                     showInspector = true
                                 }
                             } label: {
-                                Label("Profile", systemImage: "brain")
+                                Label("Ask AI", systemImage: "brain")
                                     .font(.subheadline.bold())
                             }
                             .buttonStyle(.borderedProminent)
@@ -194,16 +268,36 @@ public struct ContentView: View {
                             .tint(.white)
                         }
                     }
-                    .padding(12)
+                    .padding(11)
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 12)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
                 }
             }
             .onAppear { camera.start() }
             .onDisappear {
                 lidar.cancel()
                 camera.stop()
+            }
+            .onChange(of: camera.liveComponents) { _, newComps in
+                guard frozenImage == nil, !newComps.isEmpty else { return }
+                Task {
+                    await explainer.liveAnalyzeIfNeeded(
+                        components: newComps,
+                        lidar: activeProfile?.lidar ?? lidar.latestMeasurement,
+                        level: level
+                    )
+                }
+            }
+            .onChange(of: level) { _, newLevel in
+                guard !activeComponents.isEmpty else { return }
+                Task {
+                    await explainer.liveAnalyzeIfNeeded(
+                        components: activeComponents,
+                        lidar: activeProfile?.lidar ?? lidar.latestMeasurement,
+                        level: newLevel
+                    )
+                }
             }
             .sheet(isPresented: $showInspector) {
                 if let profile = activeProfile {
@@ -253,6 +347,7 @@ public struct ContentView: View {
                         activeProfile = nil
                         frozenImage = nil
                         frozenComponents = []
+                        selectedComponent = nil
                         isAddingAngle = false
                         explainer.summary = nil
                         explainer.chatTurns = []
@@ -260,6 +355,87 @@ public struct ContentView: View {
                         camera.start()
                     }
                 )
+            }
+        }
+    }
+
+    // MARK: - Live AI Analysis HUD Card
+
+    @ViewBuilder
+    private var liveAIAnalysisCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: explainer.isLiveAnalyzing || explainer.isThinking ? "sparkles" : "brain.head.profile")
+                    .font(.caption.bold())
+                    .foregroundStyle(.cyan)
+                Text(explainer.isLiveAnalyzing || explainer.isThinking ? "LIVE AI ANALYZING..." : "LIVE AI ANALYSIS")
+                    .font(.system(size: 10.5, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(.cyan)
+                if explainer.isLiveAnalyzing || explainer.isThinking {
+                    ProgressView().controlSize(.mini).tint(.cyan)
+                }
+                Spacer()
+                if explainer.summary?.safetyNote != nil {
+                    Label("HV", systemImage: "bolt.trianglebadge.exclamationmark.fill")
+                        .font(.system(size: 10, weight: .bold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.red.opacity(0.28), in: Capsule())
+                        .foregroundStyle(.red)
+                }
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isLiveCardExpanded.toggle()
+                    }
+                } label: {
+                    Image(systemName: isLiveCardExpanded ? "chevron.down" : "chevron.up")
+                        .font(.caption.bold())
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+            }
+
+            if let s = explainer.summary {
+                Text(s.deviceGuess)
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+
+                if isLiveCardExpanded {
+                    Text(s.wholeBoardStory)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.9))
+                        .lineLimit(3)
+
+                    HStack(spacing: 6) {
+                        Text(s.signalFlow)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.yellow)
+                            .lineLimit(1)
+                        Spacer()
+                        Text(explainer.isAppleIntelligenceAvailable ? "Apple Intelligence" : "On-Device")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.55))
+                    }
+                }
+            } else {
+                Text(activeComponents.isEmpty
+                     ? "Point your camera slowly over any circuit board — AR labels and live AI explanation will appear automatically."
+                     : "Reading \(activeComponents.count) symbols on this board...")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(2)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(.cyan.opacity(0.35), lineWidth: 1)
+        )
+        .onTapGesture {
+            if !activeComponents.isEmpty {
+                openQuickInspect(components: activeComponents)
             }
         }
     }
@@ -276,9 +452,9 @@ public struct ContentView: View {
             return "Aim at another side or close-up IC, then tap Add Angle"
         }
         if activeComponents.isEmpty {
-            return "Aim at any board (silkscreen codes or chip tops)"
+            return "Scanning live for symbols (C3, R12, U1, IC5)…"
         }
-        return "\(activeComponents.count) parts mapped"
+        return "\(activeComponents.count) board symbols locked in AR"
     }
 
     private var primaryButtonTitle: String {
@@ -319,7 +495,7 @@ public struct ContentView: View {
 
     private func openQuickInspect(components: [DetectedComponent]) {
         var profile = activeProfile ?? BoardProfile(
-            name: "Scanned Circuit Board",
+            name: explainer.summary?.deviceGuess ?? "Scanned Circuit Board",
             lidar: lidar.latestMeasurement,
             components: components
         )
@@ -332,7 +508,8 @@ public struct ContentView: View {
             await explainer.analyze(profile: profile, level: level)
             if var updated = activeProfile {
                 updated.summary = explainer.summary
-                if let guess = explainer.summary?.deviceGuess, updated.name == "Scanned Circuit Board" || updated.name == "Unknown Circuit Board" {
+                if let guess = explainer.summary?.deviceGuess,
+                   updated.name == "Scanned Circuit Board" || updated.name == "Unknown Circuit Board" {
                     updated.name = guess
                 }
                 activeProfile = updated
@@ -368,6 +545,7 @@ public struct ContentView: View {
         if frozenImage != nil && !isAddingAngle {
             frozenImage = nil
             frozenComponents = []
+            selectedComponent = nil
             return
         }
         guard let snap = camera.captureSnapshot(), let cg = snap.cgImage else {
@@ -388,7 +566,7 @@ public struct ContentView: View {
                 profile = existing
             } else {
                 profile = BoardProfile(
-                    name: "Unknown Circuit Board",
+                    name: explainer.summary?.deviceGuess ?? "Unknown Circuit Board",
                     lidar: lidar.latestMeasurement
                 )
                 explainer.chatTurns = []
@@ -448,7 +626,6 @@ private struct BoardInspectorSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                // Board Profile Header: Name, LiDAR dimensions, Multi-angle gallery
                 Section {
                     TextField("Board Name", text: $boardName)
                         .font(.headline)
@@ -555,13 +732,13 @@ private struct BoardInspectorSheet: View {
                     Text("Whole-Board Explanation")
                 }
 
-                // Functional zones breakdown for unknown boards
                 ForEach(profile.functionalZones, id: \.zone) { group in
                     Section {
                         ForEach(group.items) { comp in
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
-                                    Circle().fill(comp.category.color).frame(width: 9, height: 9)
+                                    Image(systemName: comp.category.sfSymbol)
+                                        .foregroundStyle(comp.category.color)
                                     Text(comp.displayTitle).font(.subheadline.bold().monospaced())
                                     Spacer()
                                     Text(comp.category.rawValue).font(.caption).foregroundStyle(.secondary)

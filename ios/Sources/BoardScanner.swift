@@ -12,9 +12,9 @@ public final class BoardScanner: Sendable {
                 let observations = (req.results as? [VNRecognizedTextObservation]) ?? []
                 continuation.resume(returning: Self.extractComponents(from: observations))
             }
-            request.recognitionLevel = accurate ? .accurate : .fast
+            request.recognitionLevel = .accurate
             request.usesLanguageCorrection = false
-            request.minimumTextHeight = accurate ? 0.015 : 0.025
+            request.minimumTextHeight = accurate ? 0.008 : 0.011
 
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
             do {

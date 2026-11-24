@@ -89,6 +89,54 @@ public enum ComponentCategory: String, Codable, Sendable, CaseIterable {
         case .unknown: return "An electronic component labeled on the circuit board."
         }
     }
+
+    public var sfSymbol: String {
+        switch self {
+        case .resistor: return "waveform.path"
+        case .capacitor: return "battery.75percent"
+        case .ic: return "cpu"
+        case .relay: return "arrow.triangle.swap"
+        case .diode: return "arrowtriangle.right.fill"
+        case .transistor: return "switch.2"
+        case .inductor: return "wave.3.right"
+        case .fuse: return "bolt.shield.fill"
+        case .connector: return "cable.connector"
+        case .crystal: return "metronome.fill"
+        case .led: return "lightbulb.fill"
+        case .transformer: return "bolt.horizontal.circle.fill"
+        case .switchPart: return "button.programmable"
+        case .testPoint: return "scope"
+        case .protection: return "shield.lefthalf.filled.badge.checkmark"
+        case .sensor: return "sensor.tag.radiowaves.forward.fill"
+        case .battery: return "battery.100.bolt"
+        case .speaker: return "speaker.wave.2.fill"
+        case .unknown: return "questionmark.circle"
+        }
+    }
+
+    public var shortRole: String {
+        switch self {
+        case .resistor: return "Flow limiter"
+        case .capacitor: return "Power tank"
+        case .ic: return "Chip brain"
+        case .relay: return "Heavy switch"
+        case .diode: return "One-way valve"
+        case .transistor: return "Fast switch"
+        case .inductor: return "Magnetic coil"
+        case .fuse: return "Safety fuse"
+        case .connector: return "Wire port"
+        case .crystal: return "Clock beat"
+        case .led: return "Status light"
+        case .transformer: return "Voltage step"
+        case .switchPart: return "Button/switch"
+        case .testPoint: return "Test pad"
+        case .protection: return "Surge guard"
+        case .sensor: return "Sensor"
+        case .battery: return "Battery"
+        case .speaker: return "Audio/buzzer"
+        case .unknown: return "Board part"
+        }
+    }
 }
 
 public struct DetectedComponent: Identifiable, Codable, Equatable, Sendable {
