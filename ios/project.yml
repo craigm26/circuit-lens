@@ -7,8 +7,8 @@ options:
 settings:
   base:
     DEVELOPMENT_TEAM: WYGG3JXWMG
-    MARKETING_VERSION: "1.0.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "1.1.0"
+    CURRENT_PROJECT_VERSION: "2"
     SWIFT_VERSION: "6.0"
   configs:
     debug:
@@ -47,7 +47,7 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         ITSAppUsesNonExemptEncryption: false
-        NSCameraUsageDescription: "CircuitLens uses the camera to read silkscreen reference codes and chip markings on circuit boards in AR."
+        NSCameraUsageDescription: "CircuitLens uses the camera and LiDAR depth sensor to measure circuit boards, read silkscreen codes, and map unknown electronics in AR."
         NSLocalNetworkUsageDescription: "CircuitLens saves your family electronics teardowns to your local pi-nas.local studio server."
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true

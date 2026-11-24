@@ -28,7 +28,7 @@ public final class BoardScanner: Sendable {
     public static func extractComponents(from observations: [VNRecognizedTextObservation]) -> [DetectedComponent] {
         struct ChipHit {
             let marking: String
-            let hint: String
+            let hint: String?
             let center: CGPoint
         }
 
@@ -81,11 +81,14 @@ public final class BoardScanner: Sendable {
             ))
         }
 
-        // Include standalone recognized chips if no nearby IC designator claimed them
+        // Include standalone recognized or unknown laser-etched chips if no nearby IC designator claimed them
+        var unknownChipIndex = 1
         for chip in chipHits {
             if !results.contains(where: { $0.partMarking == chip.marking }) {
+                let des = "IC?\(unknownChipIndex)"
+                unknownChipIndex += 1
                 results.append(DetectedComponent(
-                    designator: "IC",
+                    designator: des,
                     category: .ic,
                     partMarking: chip.marking,
                     partHint: chip.hint,

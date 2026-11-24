@@ -20,7 +20,7 @@ public enum LearningLevel: String, CaseIterable, Identifiable, Codable, Sendable
     }
 }
 
-public enum ComponentCategory: String, Codable, Sendable {
+public enum ComponentCategory: String, Codable, Sendable, CaseIterable {
     case resistor = "Resistor"
     case capacitor = "Capacitor"
     case ic = "Integrated Circuit"
@@ -36,7 +36,20 @@ public enum ComponentCategory: String, Codable, Sendable {
     case switchPart = "Switch / Button"
     case testPoint = "Test Point"
     case protection = "Surge Protection"
+    case sensor = "Sensor / Transducer"
+    case battery = "Battery / Power Cell"
+    case speaker = "Speaker / Buzzer"
     case unknown = "Component"
+
+    public var functionalZone: String {
+        switch self {
+        case .fuse, .transformer, .protection, .battery: return "Power & Protection"
+        case .ic, .crystal: return "Brains & Timing"
+        case .relay, .transistor, .switchPart: return "Switching & Control"
+        case .connector, .testPoint, .led, .speaker, .sensor: return "I/O, Ports & Sensors"
+        case .resistor, .capacitor, .inductor, .diode, .unknown: return "Passives & Filtering"
+        }
+    }
 
     public var color: Color {
         switch self {
@@ -46,6 +59,8 @@ public enum ComponentCategory: String, Codable, Sendable {
         case .relay, .fuse, .transformer, .protection: return Color(red: 0.94, green: 0.33, blue: 0.25)
         case .diode, .led: return Color(red: 0.75, green: 0.52, blue: 0.99)
         case .transistor: return Color(red: 0.18, green: 0.83, blue: 0.75)
+        case .sensor, .speaker: return Color(red: 0.98, green: 0.45, blue: 0.68)
+        case .battery: return Color(red: 0.16, green: 0.78, blue: 0.45)
         case .connector, .testPoint: return Color(red: 0.82, green: 0.86, blue: 0.91)
         default: return Color(red: 0.58, green: 0.64, blue: 0.72)
         }
@@ -68,18 +83,20 @@ public enum ComponentCategory: String, Codable, Sendable {
         case .switchPart: return "A button or toggle that opens or closes a circuit when pressed."
         case .testPoint: return "A metal pad engineers touch with a meter to check if the board is healthy."
         case .protection: return "A lightning guard that absorbs sudden voltage spikes from the wall."
+        case .sensor: return "An electronic eye, ear, or thermometer that senses the outside world."
+        case .battery: return "A stored-energy cell that keeps clocks or circuits alive without wall power."
+        case .speaker: return "A tiny vibrating disc that turns electrical pulses into beeps or sound."
         case .unknown: return "An electronic component labeled on the circuit board."
         }
     }
 }
 
 public struct DetectedComponent: Identifiable, Codable, Equatable, Sendable {
-    public var id: String { "\(designator)-\(Int(boxX * 1000))-\(Int(boxY * 1000))" }
+    public var id: String { "\(designator)-\(partMarking ?? "none")" }
     public let designator: String
     public let category: ComponentCategory
     public let partMarking: String?
     public let partHint: String?
-    /// Normalized Vision coordinates (0..1, origin bottom-left).
     public let boxX: Double
     public let boxY: Double
     public let boxW: Double
@@ -94,46 +111,93 @@ public struct DetectedComponent: Identifiable, Codable, Equatable, Sendable {
 }
 
 public enum DesignatorCatalog {
-    /// Longest prefix first so "IC" beats "I", "RY" beats "R", "LED" beats "L", "TP" beats "T".
+    /// Comprehensive IEEE/IPC-2612 reference designator prefixes (longest first).
     private static let prefixMap: [(String, ComponentCategory)] = [
-        ("MOV", .protection), ("TVS", .protection), ("ESD", .protection),
-        ("LED", .led), ("PTC", .fuse), ("NTC", .resistor),
-        ("IC", .ic), ("RY", .relay), ("RL", .relay), ("CR", .diode),
-        ("CN", .connector), ("CON", .connector), ("TP", .testPoint),
-        ("SW", .switchPart), ("FB", .inductor), ("VR", .resistor),
-        ("RV", .resistor), ("DS", .led), ("BT", .connector), ("TR", .transformer),
+        ("MOV", .protection), ("TVS", .protection), ("ESD", .protection), ("VAR", .protection),
+        ("LED", .led), ("PTC", .fuse), ("NTC", .sensor), ("BZR", .speaker),
+        ("CON", .connector), ("USB", .connector), ("HDR", .connector), ("ANT", .connector),
+        ("BAT", .battery), ("MIC", .sensor), ("SPK", .speaker), ("OPT", .ic),
+        ("IC", .ic), ("RY", .relay), ("RL", .relay), ("CR", .diode), ("ZD", .diode),
+        ("CN", .connector), ("JP", .connector), ("TP", .testPoint), ("SW", .switchPart),
+        ("FB", .inductor), ("FL", .inductor), ("VR", .resistor), ("RV", .resistor),
+        ("RN", .resistor), ("RT", .sensor), ("TH", .sensor), ("DS", .led),
+        ("BT", .battery), ("BZ", .speaker), ("LS", .speaker), ("MK", .sensor),
+        ("TR", .transformer), ("PS", .ic), ("AR", .ic),
         ("U", .ic), ("C", .capacitor), ("R", .resistor), ("D", .diode),
         ("Q", .transistor), ("L", .inductor), ("F", .fuse), ("J", .connector),
         ("K", .relay), ("T", .transformer), ("X", .crystal), ("Y", .crystal),
-        ("P", .connector), ("S", .switchPart),
+        ("P", .connector), ("S", .switchPart), ("B", .battery), ("Z", .diode),
     ]
 
     private static let knownChips: [(pattern: String, hint: String, mainsRelated: Bool)] = [
+        // Mains & AC-DC Switching Power
         ("MIP290", "Panasonic MIP290 off-line AC-DC switching power supply IC", true),
         ("MIP2", "Panasonic MIP-series AC-DC switching regulator IC", true),
         ("TNY2", "Power Integrations TinySwitch AC-DC switching power IC", true),
         ("LNK3", "Power Integrations LinkSwitch AC-DC power regulator IC", true),
+        ("TOP2", "Power Integrations TOPSwitch AC-DC power IC", true),
+        ("VIPER", "STMicro VIPer off-line AC-DC converter IC", true),
         ("PC817", "Optocoupler isolating high-voltage mains from low-voltage logic", true),
         ("EL817", "Optocoupler isolating high-voltage mains from low-voltage logic", true),
+        ("MOC30", "Triac driver optocoupler for AC load switching", true),
+        ("BT13", "TRIAC for AC mains load switching", true),
+        // DC-DC & Linear Regulators
         ("LM7805", "5V linear voltage regulator", false),
         ("LM7812", "12V linear voltage regulator", false),
+        ("LM317", "Adjustable linear voltage regulator", false),
         ("AMS1117", "Low-dropout (LDO) linear voltage regulator (often 3.3V or 5V)", false),
-        ("LM358", "Dual operational amplifier (op-amp)", false),
-        ("NE555", "Classic 555 timer IC", false),
-        ("ULN2003", "7-channel Darlington transistor array (drives relays or motors)", false),
+        ("TLV1117", "TI low-dropout (LDO) linear voltage regulator", false),
+        ("LM2596", "Step-down (buck) switching DC-DC regulator", false),
+        ("MP1584", "High-frequency step-down (buck) DC-DC converter", false),
+        ("XL4015", "High-current step-down (buck) DC-DC converter", false),
+        ("TPS54", "TI SWIFT step-down DC-DC buck converter", false),
+        ("BQ24", "TI Li-Ion battery charger management IC", false),
+        ("TP4056", "Single-cell Li-Ion battery charger IC", false),
+        // Microcontrollers & SoCs
         ("ATMEGA", "Microchip AVR microcontroller (Arduino-family MCU)", false),
+        ("ATTINY", "Microchip compact AVR microcontroller", false),
         ("ESP32", "Espressif Wi-Fi + Bluetooth microcontroller", false),
+        ("ESP8266", "Espressif Wi-Fi microcontroller", false),
         ("RP2040", "Raspberry Pi dual-core ARM Cortex-M0+ microcontroller", false),
         ("RP2350", "Raspberry Pi RP2350 microcontroller", false),
         ("STM32", "STMicroelectronics ARM Cortex-M microcontroller", false),
+        ("NRF52", "Nordic Semiconductor Bluetooth LE SoC", false),
+        ("NRF53", "Nordic Semiconductor dual-core Bluetooth LE Audio SoC", false),
+        ("PIC16", "Microchip PIC 8-bit microcontroller", false),
+        ("PIC18", "Microchip PIC 8-bit microcontroller", false),
+        ("SAMD21", "Microchip ARM Cortex-M0+ microcontroller", false),
+        // USB, Serial, CAN, Memory & Drivers
+        ("CH340", "WCH USB-to-UART serial bridge chip", false),
+        ("CP210", "Silicon Labs USB-to-UART serial bridge chip", false),
+        ("FT232", "FTDI USB-to-UART serial interface IC", false),
+        ("MAX232", "RS-232 serial level shifter IC", false),
+        ("MAX485", "RS-485 differential bus transceiver", false),
+        ("MCP2515", "CAN bus controller IC", false),
+        ("TJA1050", "High-speed CAN bus transceiver", false),
+        ("W25Q", "Winbond SPI NOR Flash memory chip", false),
+        ("AT24C", "I2C EEPROM non-volatile memory chip", false),
+        ("ULN2003", "7-channel Darlington transistor array (drives relays or steppers)", false),
+        ("L298", "Dual H-bridge DC/stepper motor driver", false),
+        ("DRV88", "TI motor driver IC", false),
+        ("TB6612", "Toshiba dual DC motor driver IC", false),
+        ("PCA9685", "16-channel I2C PWM/servo controller IC", false),
+        // Analog, Timers, Logic & Sensors
+        ("LM358", "Dual operational amplifier (op-amp)", false),
+        ("LM324", "Quad operational amplifier (op-amp)", false),
+        ("NE555", "Classic 555 timer IC", false),
+        ("74HC", "74-series high-speed CMOS digital logic IC", false),
+        ("74LS", "74-series TTL digital logic IC", false),
+        ("CD40", "4000-series CMOS digital logic IC", false),
+        ("ADS1115", "16-bit I2C analog-to-digital converter (ADC)", false),
+        ("BME280", "Bosch temperature, humidity & pressure sensor", false),
+        ("MPU6050", "6-axis gyroscope + accelerometer IMU", false),
     ]
 
-    /// Parse a silkscreen token like "C3", "IC5", "RY2", "R104", "TP1".
     public static func classifyDesignator(_ raw: String) -> (designator: String, category: ComponentCategory)? {
         let cleaned = raw
             .uppercased()
             .trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        guard cleaned.count >= 2, cleaned.count <= 6 else { return nil }
+        guard cleaned.count >= 2, cleaned.count <= 7 else { return nil }
 
         for (prefix, category) in prefixMap {
             if cleaned.hasPrefix(prefix) {
@@ -146,22 +210,36 @@ public enum DesignatorCatalog {
         return nil
     }
 
-    /// Match common laser-etched IC markings like "MIP290", "LM7805", "ESP32".
-    public static func matchChipMarking(_ raw: String) -> (marking: String, hint: String, mainsRelated: Bool)? {
+    /// Match either a known IC part number OR a plausible unknown laser-etched IC code (e.g. SN74HC595, BQ25895).
+    public static func matchChipMarking(_ raw: String) -> (marking: String, hint: String?, mainsRelated: Bool)? {
         let cleaned = raw
             .uppercased()
             .replacingOccurrences(of: " ", with: "")
             .trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        guard cleaned.count >= 4 else { return nil }
+        guard cleaned.count >= 4, cleaned.count <= 14 else { return nil }
+
         for entry in knownChips {
             if cleaned.contains(entry.pattern) {
-                return (entry.pattern, entry.hint, entry.mainsRelated)
+                return (cleaned, entry.hint, entry.mainsRelated)
             }
+        }
+
+        // Generic unknown chip part-number heuristic:
+        // Starts with 1-4 letters, followed by 2+ digits, optionally trailing letters/digits
+        // (ignores pure words like "JAPAN", "ROHS", "REV1", "2024").
+        let ignoredPrefixes = ["REV", "VER", "PCB", "GND", "VCC", "VDD", "VSS", "ROHS", "MADE", "DATE", "PART", "MODEL"]
+        if ignoredPrefixes.contains(where: { cleaned.hasPrefix($0) }) { return nil }
+        if classifyDesignator(cleaned) != nil { return nil }
+
+        let letters = cleaned.prefix(while: \.isLetter)
+        let afterLetters = cleaned.dropFirst(letters.count)
+        let digits = afterLetters.prefix(while: \.isNumber)
+        if (2...4).contains(letters.count), digits.count >= 3 {
+            return (cleaned, nil, false)
         }
         return nil
     }
 
-    /// Returns true if the board shows signs of AC mains / high-voltage power circuitry.
     public static func hasHighVoltageClues(_ components: [DetectedComponent]) -> Bool {
         for c in components {
             if c.category == .relay || c.category == .fuse || c.category == .transformer || c.category == .protection {
@@ -174,7 +252,6 @@ public enum DesignatorCatalog {
         return false
     }
 
-    /// Built-in demo board matching IMG_5248.PNG so the family can explore immediately.
     public static let demoBoard: [DetectedComponent] = [
         DetectedComponent(designator: "IC5", category: .ic, partMarking: "MIP290",
                           partHint: "Panasonic MIP290 off-line AC-DC switching power supply IC",

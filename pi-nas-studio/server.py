@@ -70,14 +70,25 @@ def make_handler(data_dir: Path):
                 summ = it.get("summary") or {}
                 story = html.escape(str(summ.get("wholeBoardStory", "")))
                 flow = html.escape(str(summ.get("signalFlow", "")))
+                lidar = it.get("lidar") or {}
+                lidar_badge = ""
+                if lidar.get("estimatedWidthMM"):
+                    lidar_badge = (
+                        f" · LiDAR ~{lidar['estimatedWidthMM']}×{lidar.get('estimatedHeightMM','?')} mm"
+                        f" ({lidar.get('maxComponentReliefMM','?')} mm relief)"
+                    )
+                photo_cnt = it.get("photoCount")
+                angle_badge = f" · {photo_cnt} angles" if photo_cnt and photo_cnt > 1 else ""
                 comps = "".join(
-                    f"<li><code>{html.escape(c.get('designator',''))}</code> — {html.escape(c.get('category',''))}</li>"
+                    f"<li><code>{html.escape(c.get('designator',''))}</code> — {html.escape(c.get('category',''))}"
+                    + (f" ({html.escape(c['partMarking'])})" if c.get("partMarking") else "")
+                    + "</li>"
                     for c in it.get("components", [])
                 )
                 img_html = f'<img src="{html.escape(it["image"])}" alt="{title}" />' if it.get("image") else ""
                 cards.append(
                     f'<article class="card" id="{html.escape(it.get("id",""))}">'
-                    f'{img_html}<div class="meta">{saved} · {level}</div>'
+                    f'{img_html}<div class="meta">{saved} · {level}{lidar_badge}{angle_badge}</div>'
                     f'<h2>{title}</h2><p>{story}</p>'
                     f'<div class="flow">{flow}</div><ul>{comps}</ul></article>'
                 )

@@ -5,6 +5,9 @@ public struct StudioTeardownPayload: Codable {
     public let title: String
     public let level: String
     public let summary: BoardSummaryResult?
+    public let lidar: LiDARMeasurement?
+    public let photoCount: Int
+    public let functionalZones: [String: [String]]
     public let components: [DetectedComponent]
     public let chatTurns: [ChatTurn]
     public let imageBase64JPEG: String?
@@ -18,6 +21,8 @@ public enum StudioSync {
         title: String,
         level: LearningLevel,
         summary: BoardSummaryResult?,
+        lidar: LiDARMeasurement? = nil,
+        photoCount: Int = 1,
         components: [DetectedComponent],
         chatTurns: [ChatTurn],
         image: UIImage?
@@ -26,10 +31,17 @@ public enum StudioSync {
             throw URLError(.badURL)
         }
         let jpegB64 = image?.jpegData(compressionQuality: 0.78)?.base64EncodedString()
+        var zones: [String: [String]] = [:]
+        for c in components {
+            zones[c.category.functionalZone, default: []].append(c.displayTitle)
+        }
         let payload = StudioTeardownPayload(
             title: title,
             level: level.rawValue,
             summary: summary,
+            lidar: lidar,
+            photoCount: photoCount,
+            functionalZones: zones,
             components: components,
             chatTurns: chatTurns,
             imageBase64JPEG: jpegB64
